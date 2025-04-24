@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>Vehicle Radio</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div id="container" style="display: none;">
+        <h2>Vehicle Radio</h2>
+
+        <div id="current-status">
+            Status: <span id="status-text">Stopped</span> <br>
+            Now Playing: <span id="playing-url">N/A</span>
+        </div>
+
+        <hr>
+
+        <div id="controls">
+            <label for="url-input">URL / Favorite ID:</label>
+            <input type="text" id="url-input" placeholder="Enter URL or Favorite ID">
+
+            <label for="volume-slider">Volume:</label>
+            <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="0.2">
+            <span id="volume-value">20%</span>
+
+            <button id="play-button">Play</button>
+            <button id="stop-button">Stop</button>
+        </div>
+
+        <hr>
+
+        <div id="favorites-section">
+            <h3>Favorites</h3>
+            <div id="favorites-list">
+                <p>Loading...</p>
+            </div>
+            <div id="save-favorite">
+                <input type="text" id="fav-id-input" placeholder="Save as ID">
+                <button id="save-button">Save Current URL</button>
+                <p class="info">(Uses the URL from the input field above)</p>
+            </div>
+        </div>
+
+        <hr>
+
+        <button id="close-button">Close</button>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
