@@ -1,8 +1,9 @@
 -- Server/Server.lua
 
 local ResourceName = GetCurrentResourceName()
-local Favorites = {}     -- { [license] = { [favId] = url, ... }, ... }
-local FavoriteFiles = {} -- { [license] = true, ... } - Tracks which licenses have files
+-- New Favorites Structure: { [license] = { [favUUID] = { nickname = "...", url = "..." }, ... } }
+local Favorites = {}
+local FavoriteFiles = {} -- Still tracks which licenses have files { [license] = true }
 
 -- Debug Print Helper
 local function DebugPrint(...)
@@ -28,9 +29,18 @@ local function GetUserID(src)
     return nil
 end
 
--- Load Favorites on Start
+-- Function to generate a simple unique-ish ID for favorites
+local function GenerateFavoriteUUID()
+    -- Simple combination of time and random number (not truly UUID)
+    return string.format("fav_%d_%d", os.time(), math.random(10000, 99999))
+end
+
+-- Load Favorites on Start (Updated to handle new structure)
 Citizen.CreateThread(function()
-    if not Config.EnableFavorites then return end
+    if not Config.EnableFavorites then
+        print(string.format("[%s] [Server] Favorites system disabled in config.", ResourceName))
+        return
+    end
 
     local fileData = LoadResourceFile(ResourceName, "Favorites/_FILES.json")
     if fileData then
@@ -40,21 +50,39 @@ Citizen.CreateThread(function()
             DebugPrint("Loaded _FILES.json index.")
 
             for userId, _ in pairs(FavoriteFiles) do
-                local favData = LoadResourceFile(ResourceName, "Favorites/" .. userId .. ".json")
+                local favFilePath = "Favorites/" .. userId .. ".json"
+                local favData = LoadResourceFile(ResourceName, favFilePath)
                 if favData then
                     local favSuccess, favDecoded = pcall(json.decode, favData)
+                    -- Basic validation for new structure (check if first item has nickname/url)
+                    local isValidStructure = false
                     if favSuccess and type(favDecoded) == 'table' then
+                        -- Check if it's empty or if the first element looks correct
+                        local firstKey = next(favDecoded)
+                        if not firstKey or (type(favDecoded[firstKey]) == 'table' and favDecoded[firstKey].nickname and favDecoded[firstKey].url) then
+                            isValidStructure = true
+                        end
+                    end
+
+                    if isValidStructure then
                         Favorites[userId] = favDecoded
                         DebugPrint("Loaded favorites for:", userId)
                     else
-                        DebugPrint("Failed to decode favorites for:", userId, "- Error:", favDecoded or "Unknown")
+                        DebugPrint("Failed to decode favorites for:", userId,
+                            "or structure is outdated/invalid from file:", favFilePath, ". Error/Data:",
+                            favDecoded or "Unknown Decode Error")
+                        -- Handle outdated structure? Maybe backup and reset?
+                        -- os.rename(GetCurrentResourcePath() .. "/" .. favFilePath, GetCurrentResourcePath() .. "/" .. favFilePath .. ".old")
+                        -- Favorites[userId] = {}
+                        -- SaveUserFavorites(userId) -- This would create a new empty file
                     end
                 else
-                    DebugPrint("Could not load favorites file for:", userId, "(referenced in index)")
+                    DebugPrint("Could not load favorites file for:", userId, "(referenced in index at path:", favFilePath,
+                        ")")
                 end
             end
         else
-            DebugPrint("Failed to decode _FILES.json or it's not a table. Error:", decodedData or "Unknown")
+            DebugPrint("Failed to decode _FILES.json or it's not a table. Error:", decodedData or "Unknown Decode Error")
         end
     else
         DebugPrint("_FILES.json not found. Starting fresh.")
@@ -64,70 +92,80 @@ end)
 
 -- Save Favorites Function
 local function SaveUserFavorites(userId)
-    if not Config.EnableFavorites or not userId or not Favorites[userId] then return end
+    if not Config.EnableFavorites or not userId or not Favorites[userId] then
+        DebugPrint("SaveUserFavorites skipped: Favorites disabled, no userId, or no favorites data for user:", userId)
+        return
+    end
+
+    local favFilePath = "Favorites/" .. userId .. ".json"
+    -- Ensure the Favorites directory exists (optional but good practice)
+    -- CreateDirectory(GetCurrentResourcePath() .. "/Favorites") -- Requires server permissions
 
     local success, encodedData = pcall(json.encode, Favorites[userId])
     if success then
-        if SaveResourceFile(ResourceName, "Favorites/" .. userId .. ".json", encodedData, -1) then
-            DebugPrint("Saved favorites for:", userId)
+        if SaveResourceFile(ResourceName, favFilePath, encodedData, -1) then
+            DebugPrint("Saved favorites for:", userId, "to", favFilePath)
             -- Update and save the index file
             FavoriteFiles[userId] = true
             local indexSuccess, indexEncoded = pcall(json.encode, FavoriteFiles)
             if indexSuccess then
-                SaveResourceFile(ResourceName, "Favorites/_FILES.json", indexEncoded, -1)
-                DebugPrint("Updated _FILES.json index.")
+                if SaveResourceFile(ResourceName, "Favorites/_FILES.json", indexEncoded, -1) then
+                    DebugPrint("Updated _FILES.json index.")
+                else
+                    DebugPrint("!!! Failed to save _FILES.json index.")
+                end
             else
-                DebugPrint("Failed to encode _FILES.json. Error:", indexEncoded)
+                DebugPrint("!!! Failed to encode _FILES.json. Error:", indexEncoded or "Unknown Encode Error")
             end
         else
-            DebugPrint("Failed to save favorites file for:", userId)
+            DebugPrint("!!! Failed to save favorites file:", favFilePath)
         end
     else
-        DebugPrint("Failed to encode favorites for:", userId, "- Error:", encodedData)
+        DebugPrint("!!! Failed to encode favorites for:", userId, "- Error:", encodedData or "Unknown Encode Error")
     end
 end
 
 -- === Network Events from Client UI ===
 
--- Request to Play Radio
-RegisterNetEvent("CRRadio:Play", function(urlOrFavId, volume)
+-- Request to Play Radio (Now expects only a direct URL)
+RegisterNetEvent("CRRadio:Play", function(url, volume)
     local src = source
     local ped = GetPlayerPed(src)
-    if not ped or ped == 0 then return end
+    if not ped or ped == 0 then
+        DebugPrint("Play request failed: Could not get player ped for source:", src)
+        return
+    end
+
     local veh = GetVehiclePedIsIn(ped, false) -- Only if currently in vehicle
     if not veh or veh == 0 then
         Notify(src, "You must be in a vehicle to use the radio.")
+        DebugPrint("Play request failed: Player", src, "not in a vehicle.")
         return
     end
 
-    local userId = GetUserID(src)
-    local finalUrl = urlOrFavId
+    local finalUrl = url -- No more favorite ID lookup here
     local finalVolume = tonumber(volume) or Config.DefaultVolume
 
-    -- Check if it's a favorite ID
-    if Config.EnableFavorites and userId and Favorites[userId] and Favorites[userId][urlOrFavId] then
-        finalUrl = Favorites[userId][urlOrFavId]
-        DebugPrint("Playing favorite:", urlOrFavId, "->", finalUrl, "for source:", src)
-    else
-        DebugPrint("Playing URL:", finalUrl, "for source:", src)
-    end
+    DebugPrint("Processing Play request | Source:", src, "| URL:", finalUrl, "| Volume:", finalVolume)
 
-    -- Basic URL validation (very simple)
-    if not string.match(finalUrl, "^http[s]?://") then
+    -- Basic URL validation
+    if not finalUrl or not string.match(finalUrl, "^http[s]?://") then
         Notify(src, "Invalid radio URL format.")
-        DebugPrint("Invalid URL format:", finalUrl)
+        DebugPrint("Play request failed: Invalid URL format:", finalUrl)
         return
     end
 
-    -- Let SoundManager handle creation and state
+    -- Let SoundManager handle creation
     local soundId = SoundManager:CreateRadio(veh, finalUrl, finalVolume, Config.DefaultDistance)
 
     if soundId then
         Notify(src, "Radio started playing.")
-        -- Tell client the state changed (optional, state sync might handle it)
-        -- TriggerClientEvent("CRRadio:UpdateState", src, true, finalUrl, finalVolume, Config.DefaultDistance, soundId)
+        DebugPrint("Radio play successful | Source:", src, "| Vehicle:", NetworkGetNetworkIdFromEntity(veh), "| SoundID:",
+            soundId)
     else
-        Notify(src, "Failed to start radio.")
+        Notify(src, "Failed to start radio. Check URL/stream or server console.")
+        DebugPrint("!!! Radio play failed | Source:", src, "| Vehicle:", NetworkGetNetworkIdFromEntity(veh), "| URL:",
+            finalUrl)
     end
 end)
 
@@ -141,13 +179,13 @@ RegisterNetEvent("CRRadio:Stop", function()
     if veh == 0 then veh = GetVehiclePedIsIn(ped, true) end
 
     if not veh or veh == 0 then
-        -- Notify(src, "No vehicle found to stop radio.") -- Maybe not notify if they aren't in one?
+        DebugPrint("Stop request ignored: No current or last vehicle found for source:", src)
         return
     end
 
+    DebugPrint("Processing Stop request | Source:", src, "| Vehicle:", NetworkGetNetworkIdFromEntity(veh))
     SoundManager:DeleteRadio(veh)
     Notify(src, "Radio stopped.")
-    -- TriggerClientEvent("CRRadio:UpdateState", src, false) -- Tell client state changed
 end)
 
 -- Request to Set Volume
@@ -156,19 +194,24 @@ RegisterNetEvent("CRRadio:SetVolume", function(volume)
     local ped = GetPlayerPed(src)
     if not ped or ped == 0 then return end
     local veh = GetVehiclePedIsIn(ped, false)
-    if not veh or veh == 0 then return end -- Only set volume if currently inside
+    if not veh or veh == 0 then
+        DebugPrint("SetVolume request ignored: Player", src, "not in a vehicle.")
+        return
+    end -- Only set volume if currently inside
 
     local finalVolume = tonumber(volume)
     if finalVolume == nil then
         Notify(src, "Invalid volume value.")
+        DebugPrint("SetVolume request failed: Invalid volume value:", volume)
         return
     end
 
     finalVolume = math.max(Config.MinVolume, math.min(Config.MaxVolume, finalVolume)) -- Clamp volume
 
+    DebugPrint("Processing SetVolume request | Source:", src, "| Vehicle:", NetworkGetNetworkIdFromEntity(veh),
+        "| Volume:", finalVolume)
     SoundManager:SetVolume(veh, finalVolume)
     Notify(src, string.format("Radio volume set to %.0f%%", finalVolume * 100))
-    -- TriggerClientEvent("CRRadio:UpdateState", src, true, nil, finalVolume) -- Update client volume state
 end)
 
 -- Request to Set Distance (Called by client based on window/engine state)
@@ -179,59 +222,91 @@ RegisterNetEvent("CRRadio:SetDistance", function(distance)
     -- Use last vehicle in case player just exited but sound is still playing
     local veh = GetVehiclePedIsIn(ped, false)
     if veh == 0 then veh = GetVehiclePedIsIn(ped, true) end
-    if not veh or veh == 0 then return end
+    if not veh or veh == 0 then
+        DebugPrint("SetDistance request ignored: No current or last vehicle found for source:", src)
+        return
+    end
 
     local finalDistance = tonumber(distance)
-    if not finalDistance then return end
+    if not finalDistance then
+        DebugPrint("SetDistance request failed: Invalid distance value:", distance)
+        return
+    end
 
+    DebugPrint("Processing SetDistance request | Source:", src, "| Vehicle:", NetworkGetNetworkIdFromEntity(veh),
+        "| Distance:", finalDistance)
     SoundManager:SetDistance(veh, finalDistance)
-    -- No notification needed for distance change usually
-    DebugPrint("Distance updated for vehicle", NetworkGetNetworkIdFromEntity(veh), "to", finalDistance)
-    -- TriggerClientEvent("CRRadio:UpdateState", src, true, nil, nil, finalDistance) -- Update client distance state
 end)
 
 
--- Request to Save Favorite
-RegisterNetEvent("CRRadio:SaveFavorite", function(favId, url)
-    if not Config.EnableFavorites then return end
+-- Request to Save Favorite (Updated)
+RegisterNetEvent("CRRadio:SaveFavorite", function(nickname, url)
+    if not Config.EnableFavorites then
+        Notify(src, "Favorites system is disabled on the server.")
+        return
+    end
 
     local src = source
     local userId = GetUserID(src)
     if not userId then
-        Notify(src, "Error retrieving user ID.")
+        Notify(src, "Error retrieving user ID. Cannot save favorite.")
+        DebugPrint("SaveFavorite failed: Could not get UserID for source", src)
         return
     end
 
-    if not favId or favId == "" or not url or not string.match(url, "^http[s]?://") then
-        Notify(src, "Invalid Favorite ID or URL format.")
+    -- Validate inputs
+    if not nickname or nickname == "" or not url or not string.match(url, "^http[s]?://") then
+        Notify(src, "Invalid Nickname or URL format for favorite.")
+        DebugPrint("SaveFavorite failed: Invalid nickname or URL format | Nickname:", nickname, "| URL:", url)
         return
     end
 
     if Favorites[userId] == nil then Favorites[userId] = {} end
 
-    Favorites[userId][favId] = url
+    -- Check for duplicate nicknames (optional, but good UX)
+    for favUUID, favData in pairs(Favorites[userId]) do
+        if favData.nickname == nickname then
+            Notify(src, string.format("A favorite with the nickname '%s' already exists.", nickname))
+            DebugPrint("SaveFavorite failed: Duplicate nickname found | User:", userId, "| Nickname:", nickname)
+            return
+        end
+    end
+
+    local favUUID = GenerateFavoriteUUID() -- Generate a unique ID for this favorite
+    Favorites[userId][favUUID] = { nickname = nickname, url = url }
+    DebugPrint("Saving new favorite | User:", userId, "| UUID:", favUUID, "| Nickname:", nickname, "| URL:", url)
     SaveUserFavorites(userId)
 
-    Notify(src, string.format("Favorite '%s' saved.", favId))
+    Notify(src, string.format("Favorite '%s' saved.", nickname))
     -- Send updated list back to the client's UI
     TriggerClientEvent("CRRadio:ReceiveFavorites", src, Favorites[userId])
 end)
 
--- Request to Delete Favorite
-RegisterNetEvent("CRRadio:DeleteFavorite", function(favId)
-    if not Config.EnableFavorites then return end
-
-    local src = source
-    local userId = GetUserID(src)
-    if not userId or not Favorites[userId] or not Favorites[userId][favId] then
-        Notify(src, "Favorite not found.")
+-- Request to Delete Favorite (Updated to use favUUID)
+RegisterNetEvent("CRRadio:DeleteFavorite", function(favUUID)
+    if not Config.EnableFavorites then
+        Notify(src, "Favorites system is disabled on the server.")
         return
     end
 
-    Favorites[userId][favId] = nil
+    local src = source
+    local userId = GetUserID(src)
+
+    -- Check if favorite exists before trying to delete
+    if not userId or not Favorites[userId] or not Favorites[userId][favUUID] then
+        Notify(src, "Favorite not found or already deleted.")
+        DebugPrint("DeleteFavorite failed: FavUUID", favUUID, "not found for user", userId)
+        -- Optionally send updated list back even if not found, to ensure client UI is correct
+        if userId and Favorites[userId] then TriggerClientEvent("CRRadio:ReceiveFavorites", src, Favorites[userId]) end
+        return
+    end
+
+    local deletedNickname = Favorites[userId][favUUID].nickname -- Get name for notification
+    DebugPrint("Deleting favorite | User:", userId, "| UUID:", favUUID, "| Nickname:", deletedNickname)
+    Favorites[userId][favUUID] = nil                            -- Remove the favorite entry
     SaveUserFavorites(userId)
 
-    Notify(src, string.format("Favorite '%s' deleted.", favId))
+    Notify(src, string.format("Favorite '%s' deleted.", deletedNickname))
     -- Send updated list back to the client's UI
     TriggerClientEvent("CRRadio:ReceiveFavorites", src, Favorites[userId])
 end)
@@ -247,6 +322,10 @@ RegisterNetEvent("CRRadio:RequestFavorites", function()
 
     if userId and Favorites[userId] then
         userFavorites = Favorites[userId]
+    elseif userId then
+        DebugPrint("No favorites found for user:", userId, "when requested.")
+    else
+        DebugPrint("Could not get UserID for source", src, "when requesting favorites.")
     end
 
     DebugPrint("Sending favorites list to source:", src)

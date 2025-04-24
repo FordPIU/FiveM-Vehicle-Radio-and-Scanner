@@ -15,7 +15,7 @@ shared_script 'config.lua'
 
 -- Server Scripts
 server_scripts {
-    'Server/_Lib.lua',
+    'Server/Lib.lua',
     'Server/Server.lua'
 }
 

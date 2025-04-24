@@ -3,13 +3,14 @@
 local ResourceName = GetCurrentResourceName()
 local isNuiOpen = false
 local currentVehicle = 0
-local lastVehicle = 0
+local lastVehicle = 0 -- Keep track of the last vehicle player was in
 local radioPlaying = false
 local currentVolume = Config.DefaultVolume
 local currentDistance = Config.DefaultDistance
 local currentUrl = ""
-local currentSoundId = nil   -- Track the sound ID client-side too
-local hasRadioControl = true -- Assume player has control unless engine off
+local currentSoundId = nil      -- Track the sound ID client-side too
+local hasRadioControl = true    -- Assume player has control unless engine off
+local lastSetDynamicState = nil -- Track the last dynamic state set for the current sound ID (true=dynamic, false=non-dynamic)
 
 -- Debug Print Helper
 local function DebugPrint(...)
@@ -24,7 +25,7 @@ local function DebugPrint(...)
 end
 
 
--- === NUI Functions ===
+-- === NUI Functions === (Keep As Is)
 
 function OpenRadioUI()
     if isNuiOpen then return end
@@ -32,6 +33,7 @@ function OpenRadioUI()
     currentVehicle = GetVehiclePedIsIn(ped, false)
     if currentVehicle == 0 then
         Notify(-1, "You must be in a vehicle to open the radio.")
+        DebugPrint("OpenRadioUI cancelled: Not in vehicle.")
         return
     end
 
@@ -41,8 +43,10 @@ function OpenRadioUI()
     DebugPrint("UI Opened")
 
     -- Request current state and favorites from server/state
-    TriggerServerEvent("CRRadio:RequestFavorites") -- Ask server for favorites
-    SyncStateFromEntity()                          -- Get current radio state from vehicle entity
+    if Config.EnableFavorites then
+        TriggerServerEvent("CRRadio:RequestFavorites") -- Ask server for favorites
+    end
+    SyncStateFromEntity()                              -- Get current radio state from vehicle entity to update UI
 end
 
 function CloseRadioUI()
@@ -62,31 +66,32 @@ function ToggleRadioUI()
     end
 end
 
--- NUI Callback Handlers
+-- === NUI Callback Handlers === (Keep As Is)
+
 RegisterNUICallback("close", function(data, cb)
     CloseRadioUI()
-    cb('ok')
+    cb({ ok = true }) -- NUI expects a JSON response
 end)
 
 RegisterNUICallback("play", function(data, cb)
+    -- Now expects the direct URL from the UI
     if data and data.url and data.volume ~= nil then
         local volume = tonumber(data.volume) or Config.DefaultVolume
         volume = math.max(Config.MinVolume, math.min(Config.MaxVolume, volume)) -- Clamp
-        DebugPrint("NUI requested Play:", data.url, "Volume:", volume)
-        TriggerServerEvent("CRRadio:Play", data.url, volume)
-        -- Assume success for now, state sync will update UI later if needed
-        cb('ok')
-        CloseRadioUI() -- Optionally close UI after action
+        DebugPrint("NUI requested Play URL:", data.url, "Volume:", volume)
+        TriggerServerEvent("CRRadio:Play", data.url, volume)                    -- Send direct URL
+        cb({ ok = true })
+        CloseRadioUI()                                                          -- Optionally close UI after action
     else
-        cb('error')
+        DebugPrint("NUI Play callback received invalid data:", json.encode(data or {}))
+        cb({ ok = false, error = "Invalid data received" })
     end
 end)
 
 RegisterNUICallback("stop", function(data, cb)
     DebugPrint("NUI requested Stop")
     TriggerServerEvent("CRRadio:Stop")
-    -- Assume success for now, state sync will update UI later
-    cb('ok')
+    cb({ ok = true })
     CloseRadioUI() -- Optionally close UI after action
 end)
 
@@ -96,91 +101,117 @@ RegisterNUICallback("setVolume", function(data, cb)
         volume = math.max(Config.MinVolume, math.min(Config.MaxVolume, volume)) -- Clamp
         DebugPrint("NUI requested SetVolume:", volume)
         TriggerServerEvent("CRRadio:SetVolume", volume)
-        cb('ok')
+        cb({ ok = true })
         -- Keep UI open when changing volume
     else
-        cb('error')
+        DebugPrint("NUI SetVolume callback received invalid data:", json.encode(data or {}))
+        cb({ ok = false, error = "Invalid volume data" })
     end
 end)
 
 RegisterNUICallback("saveFavorite", function(data, cb)
-    if Config.EnableFavorites and data and data.favId and data.url then
-        DebugPrint("NUI requested SaveFavorite:", data.favId, data.url)
-        TriggerServerEvent("CRRadio:SaveFavorite", data.favId, data.url)
-        cb('ok')
+    -- Expects nickname and url
+    if Config.EnableFavorites and data and data.nickname and data.url then
+        DebugPrint("NUI requested SaveFavorite:", data.nickname, data.url)
+        TriggerServerEvent("CRRadio:SaveFavorite", data.nickname, data.url) -- Pass nickname and url
+        cb({ ok = true })
     else
-        cb('error')
+        if not Config.EnableFavorites then DebugPrint("NUI SaveFavorite ignored: Disabled in config") end
+        DebugPrint("NUI SaveFavorite callback received invalid data:", json.encode(data or {}))
+        cb({ ok = false, error = "Invalid data or favorites disabled" })
     end
 end)
 
 RegisterNUICallback("deleteFavorite", function(data, cb)
-    if Config.EnableFavorites and data and data.favId then
-        DebugPrint("NUI requested DeleteFavorite:", data.favId)
-        TriggerServerEvent("CRRadio:DeleteFavorite", data.favId)
-        cb('ok')
+    -- Expects the unique favUUID
+    if Config.EnableFavorites and data and data.favUUID then
+        DebugPrint("NUI requested DeleteFavorite:", data.favUUID)
+        TriggerServerEvent("CRRadio:DeleteFavorite", data.favUUID) -- Pass favUUID
+        cb({ ok = true })
     else
-        cb('error')
+        if not Config.EnableFavorites then DebugPrint("NUI DeleteFavorite ignored: Disabled in config") end
+        DebugPrint("NUI DeleteFavorite callback received invalid data:", json.encode(data or {}))
+        cb({ ok = false, error = "Invalid data or favorites disabled" })
     end
 end)
 
 
--- === Event Handlers ===
+-- === Event Handlers === (Keep As Is)
 
 -- Receive Favorites List from Server
 RegisterNetEvent("CRRadio:ReceiveFavorites", function(favoritesList)
     if not Config.EnableFavorites then return end
     if isNuiOpen then
         DebugPrint("Received favorites list from server, sending to UI")
+        -- Send the potentially complex structure as is to JS
         SendNUIMessage({ type = "favorites", favorites = favoritesList or {} })
+    else
+        DebugPrint("Received favorites list but UI is closed.")
     end
 end)
 
--- Update UI State (Generic, can be triggered by server or client logic)
+-- Update UI State (Generic, called by SyncStateFromEntity)
 function UpdateUIState()
     if isNuiOpen then
         SendNUIMessage({
             type = "updateState",
             state = {
                 playing = radioPlaying,
-                url = currentUrl,
+                url = currentUrl, -- Send current URL to potentially fill input
                 volume = currentVolume,
-                -- favorites = {} -- Favorites are handled separately via ReceiveFavorites
             }
         })
-        DebugPrint("Sent state update to UI:", radioPlaying, currentUrl, currentVolume)
+        -- DebugPrint("Sent state update to UI:", radioPlaying, currentUrl, currentVolume) -- Can be noisy
     end
 end
 
 -- Get current radio state from the vehicle entity's state bag
+-- This function runs frequently, keep it efficient
 function SyncStateFromEntity()
     local ped = PlayerPedId()
     local veh = GetVehiclePedIsIn(ped, false)
-    if veh == 0 then veh = GetVehiclePedIsIn(ped, true) end -- Check last vehicle too
+    if veh == 0 then veh = lastVehicle end -- Use last vehicle if not in one currently
+
+    local needsUiUpdate = false
 
     if DoesEntityExist(veh) then
         local state = Entity(veh).state
+        -- Use default values if state bag items are nil
         local playingState = state.CrRadioPlaying or false
         local urlState = state.CrRadioURL or ""
         local volumeState = state.CrRadioVolume or Config.DefaultVolume
         local soundIdState = state.CrRadioSoundID or nil
-        local distanceState = state.CrRadioDistance or Config.DefaultDistance -- Get distance too
+        local distanceState = state.CrRadioDistance or Config.DefaultDistance
 
+        -- Reset dynamic state tracker if sound ID changes or stops playing
+        if soundIdState ~= currentSoundId or not playingState then
+            lastSetDynamicState = nil
+        end
+
+        -- Check if anything relevant changed
         if radioPlaying ~= playingState or currentUrl ~= urlState or currentVolume ~= volumeState or currentSoundId ~= soundIdState or currentDistance ~= distanceState then
-            DebugPrint("Syncing state from entity:", playingState, urlState, volumeState, soundIdState, distanceState)
+            -- DebugPrint("Syncing state from entity | Playing:", playingState, "| URL:", urlState, "| Vol:", volumeState, "| ID:", soundIdState, "| Dist:", distanceState)
             radioPlaying = playingState
             currentUrl = urlState
             currentVolume = volumeState
             currentSoundId = soundIdState
-            currentDistance = distanceState -- Update local distance
-            UpdateUIState()                 -- Update the UI if it's open
+            currentDistance = distanceState -- Update local distance state
+            needsUiUpdate = true
         end
     elseif radioPlaying then
-        -- Vehicle doesn't exist but we thought radio was playing? Reset state.
-        DebugPrint("Vehicle gone, resetting radio state.")
+        -- Vehicle doesn't exist (or lastVehicle doesn't) but we thought radio was playing? Reset state.
+        DebugPrint("Monitored vehicle gone, resetting radio state.")
         radioPlaying = false
         currentUrl = ""
         currentVolume = Config.DefaultVolume
         currentSoundId = nil
+        currentDistance = Config.DefaultDistance
+        lastSetDynamicState = nil -- Reset dynamic state tracker
+        needsUiUpdate = true
+    end
+
+    -- Update UI only if needed
+    if needsUiUpdate then
         UpdateUIState()
     end
 end
@@ -188,74 +219,147 @@ end
 -- === Main Logic Thread ===
 
 Citizen.CreateThread(function()
-    -- Wait for xsound and other resources to be ready (optional safety)
+    -- Wait a bit for other resources like xsound to potentially load
     Wait(5000)
     DebugPrint("Client script started. Keybind:", Config.Keybind)
 
     -- Register Keybind
     if Config.Keybind and Config.Keybind ~= '' then
-        RegisterCommand('+openRadioUI', ToggleRadioUI, false)
-        RegisterKeyMapping('+openRadioUI', 'Open Vehicle Radio', 'keyboard', Config.Keybind)
-        DebugPrint("Keybind registered.")
+        local keybindCmd = "+openRadioUI_" .. GetCurrentResourceName() -- Make command unique
+        RegisterCommand(keybindCmd, ToggleRadioUI, false)              -- Don't restrict command
+        RegisterKeyMapping(keybindCmd, 'Open Vehicle Radio', 'keyboard', Config.Keybind)
+        DebugPrint("Keybind registered:", keybindCmd, Config.Keybind)
     else
         DebugPrint("Keybind disabled in config.")
     end
 
+    local xsound = exports.xsound -- Get export once if possible (might need refresh if resource restarts)
+
     while true do
-        local sleep = 500 -- Default sleep time
+        local sleep = 500                                -- Default sleep time
         local ped = PlayerPedId()
-        local veh = GetVehiclePedIsIn(ped, false)
-        local engineRunning = false
+        local currentVeh = GetVehiclePedIsIn(ped, false) -- Check if player is IN a vehicle NOW
+        local engineRunning = true
         local windowsDown = false
 
-        if veh ~= 0 and DoesEntityExist(veh) and not IsEntityDead(veh) then
-            sleep = 150                             -- Check more frequently when in a vehicle
-            engineRunning = IsVehicleEngineOn(veh)  -- More reliable than GetIsVehicleEngineRunning
+        if currentVeh ~= 0 then
+            -- Update last vehicle if we are in one
+            lastVehicle = currentVeh
+        end
 
-            -- Check windows (simplified check - any window broken/down?)
-            for i = 0, GetNumberOfVehicleDoors(veh) do  -- Check doors too as they affect sound
-                if IsVehicleWindowIntact(veh, i) ~= true or GetVehicleDoorAngleRatio(veh, i) > 0.1 then
+        -- Use lastVehicle for most checks to allow sound to persist/adjust after exit
+        local vehicleToCheck = lastVehicle -- Primarily monitor the last known vehicle
+
+        if DoesEntityExist(vehicleToCheck) and not IsEntityDead(vehicleToCheck) then
+            sleep = 250 -- Check more frequently when near/in a relevant vehicle
+
+            -- Check windows (simplified check - any window broken/down or door open?)
+            windowsDown = false -- Reset check each loop
+            for i = 0, 3 do
+                if not IsVehicleWindowIntact(vehicleToCheck, i) then
                     windowsDown = true
                     break
                 end
             end
-            -- Optional: More precise check if needed: AreAllWindowsRolledDown(veh) - might not exist or work reliably.
-
-            -- Sync state from entity bag
-            SyncStateFromEntity()
-
-            -- Realism Checks
-            if radioPlaying then
-                -- 1. Engine Check
-                if not engineRunning and hasRadioControl then
-                    DebugPrint("Engine turned off, stopping radio.")
-                    TriggerServerEvent("CRRadio:Stop")
-                    hasRadioControl = false  -- Prevent trying to stop again immediately
-                elseif engineRunning and not hasRadioControl then
-                    DebugPrint("Engine turned back on, radio control restored (won't auto-restart).")
-                    hasRadioControl = true   -- Allow player to start radio again
-                end
-
-                -- 2. Window Check (only if engine is running)
-                if engineRunning then
-                    local targetDistance = windowsDown and Config.RolledDownDistance or Config.DefaultDistance
-                    if targetDistance ~= currentDistance then
-                        DebugPrint("Window state changed (Windows Down:", windowsDown, "), setting distance to:",
-                            targetDistance)
-                        TriggerServerEvent("CRRadio:SetDistance", targetDistance)
-                        -- The state sync will update currentDistance when the server confirms
+            if not windowsDown then
+                for i = 0, GetNumberOfVehicleDoors(vehicleToCheck) do
+                    if GetVehicleDoorAngleRatio(vehicleToCheck, i) > 0.1 then
+                        windowsDown = true
+                        break
                     end
                 end
             end
-        elseif isNuiOpen then
-            -- Automatically close UI if player leaves vehicle
-            DebugPrint("Player left vehicle, closing UI.")
-            CloseRadioUI()
-            -- Don't reset radioPlaying here, SyncStateFromEntity handles it if vehicle disappears
+
+            -- Sync state from entity bag (includes setting radioPlaying, currentSoundId etc.)
+            SyncStateFromEntity()
+
+            -- Perform checks ONLY if radio is supposed to be playing
+            if radioPlaying and currentSoundId then
+                -- 1. Engine Check (Only stop if player *is currently in* the vehicle and turns off engine)
+                if currentVeh ~= 0 and not engineRunning and hasRadioControl then
+                    DebugPrint("Engine turned off while player inside, stopping radio.")
+                    TriggerServerEvent("CRRadio:Stop")
+                    hasRadioControl = false   -- Prevent trying to stop again immediately
+                    lastSetDynamicState = nil -- Reset dynamic state as sound is stopping
+                elseif currentVeh ~= 0 and engineRunning and not hasRadioControl then
+                    DebugPrint("Engine turned back on while player inside, radio control restored.")
+                    hasRadioControl = true -- Allow player to start radio again
+                end
+
+                -- 2. Window Check (adjust distance based on state)
+                local targetDistance = windowsDown and Config.RolledDownDistance or Config.DefaultDistance
+                if targetDistance ~= currentDistance then
+                    DebugPrint("Window/Door state changed (Windows/Doors Open:", windowsDown, "), setting distance to:",
+                        targetDistance)
+                    TriggerServerEvent("CRRadio:SetDistance", targetDistance)
+                    -- State sync will update currentDistance when state bag updates
+                end
+
+                -- 3. Dynamic Sound Check (NEW)
+                local shouldBeDynamic = (currentVeh == 0) -- True if player is OUTSIDE the currentVeh, false if inside
+                if shouldBeDynamic ~= lastSetDynamicState then
+                    -- Check if xsound export is available
+                    if xsound and xsound.setSoundDynamic then
+                        DebugPrint("Setting dynamic state for SoundID:", currentSoundId, "to:", shouldBeDynamic)
+                        xsound:setSoundDynamic(currentSoundId, shouldBeDynamic)
+                        lastSetDynamicState = shouldBeDynamic -- Update the tracked state
+                    else
+                        -- Attempt to get export again if it wasn't available initially
+                        xsound = exports.xsound
+                        if not xsound or not xsound.setSoundDynamic then
+                            DebugPrint("xsound or xsound:setSoundDynamic export not available!")
+                            -- Prevent spamming this message
+                            lastSetDynamicState = -1 -- Use a placeholder to show we checked and failed
+                        else
+                            -- Retry immediately if export just became available
+                            DebugPrint("Setting dynamic state for SoundID (retry):", currentSoundId, "to:",
+                                shouldBeDynamic)
+                            xsound:setSoundDynamic(currentSoundId, shouldBeDynamic)
+                            lastSetDynamicState = shouldBeDynamic
+                        end
+                    end
+                end
+            end -- End if radioPlaying
+
+            -- Reset radio control flag if player is not *currently* in vehicle
+            if currentVeh == 0 then
+                hasRadioControl = true
+            end
+        else
+            -- Vehicle doesn't exist anymore
+            if isNuiOpen then
+                DebugPrint("Monitored vehicle gone, closing UI.")
+                CloseRadioUI()
+            end
+            -- Force state sync which should reset playing status etc.
+            SyncStateFromEntity()
+            lastVehicle = 0 -- Clear last vehicle ref if it no longer exists
         end
+
+        -- If player is far from last vehicle (and not in one), clear lastVehicle ref
+        if currentVeh == 0 and lastVehicle ~= 0 and DoesEntityExist(lastVehicle) and DoesEntityExist(ped) then
+            if #(GetEntityCoords(ped) - GetEntityCoords(lastVehicle)) > (currentDistance * 1.75) then -- Increase distance slightly
+                DebugPrint("Player far from last vehicle, clearing lastVehicle ref.")
+                lastVehicle = 0
+                -- Force state sync which should reset playing status if needed
+                SyncStateFromEntity()
+            end
+            -- Also clear if last vehicle somehow becomes invalid but wasn't caught above
+        elseif currentVeh == 0 and lastVehicle ~= 0 and not DoesEntityExist(lastVehicle) then
+            lastVehicle = 0
+            SyncStateFromEntity()
+        end
+
 
         Wait(sleep)
     end
 end)
+
+-- Initial state sync attempt shortly after start
+Citizen.CreateThread(function()
+    Wait(8000) -- Wait a bit longer
+    SyncStateFromEntity()
+end)
+
 
 print(string.format("[%s] [Client] Client.lua loaded.", ResourceName))

@@ -2,8 +2,8 @@
 Config = {}
 
 Config.DefaultVolume = 0.2       -- Default radio volume (0.0 to 1.0)
-Config.DefaultDistance = 10.0    -- Default sound distance when windows are closed/intact
-Config.RolledDownDistance = 25.0 -- Sound distance when windows are rolled down
+Config.DefaultDistance = 2.0     -- Default sound distance when windows are closed/intact
+Config.RolledDownDistance = 10.0 -- Sound distance when windows are rolled down
 Config.MaxVolume = 1.0           -- Maximum allowed volume
 Config.MinVolume = 0.0           -- Minimum allowed volume (0 = off)
 
@@ -16,7 +16,7 @@ Config.NotificationSystem =
 "native" -- Use "native" for built-in GTA V notifications, or specify framework (e.g., "qbcore", "esx") - requires adding framework-specific notification code in Client/Server.lua if not "native"
 
 -- Debug setting
-Config.DebugPrint = false -- Set to true to enable verbose printing for debugging
+Config.DebugPrint = true -- Set to true to enable verbose printing for debugging
 
 -- Function to handle notifications (adapt for your framework if not native)
 function Notify(source, message)
